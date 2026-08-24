@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Registre Arachides — Madingou</title>
+<meta name="description" content="Suivi des parcelles, coûts et récoltes d'arachides" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<meta name="theme-color" content="#4C5D2C" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Arachides" />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap');
+  html, body { margin: 0; padding: 0; overscroll-behavior: none; }
+  * { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
+  .fraunces { font-family: 'Fraunces', serif; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  .press { transition: transform .12s ease, opacity .12s ease; }
+  .press:active { transform: scale(0.95); opacity: 0.9; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .fade-up { animation: fadeUp .28s ease both; }
+  @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .sheet-up { animation: sheetUp .32s cubic-bezier(.32,.72,0,1) both; }
+  @keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+  .backdrop-in { animation: backdropIn .2s ease both; }
+  input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+/* ------------------------------------------------------------------ */
+/* Design tokens                                                       */
+/* ------------------------------------------------------------------ */
+const COLORS = {
+  page: "#E7DCC0",
+  frame: "#C9BB94",
+  card: "#F7F1DE",
+  cardAlt: "#EFE4C6",
+  ink: "#26241C",
+  inkSoft: "#5B5646",
+  leaf: "#4C5D2C",
+  leafDark: "#333F1D",
+  clay: "#AD6318",
+  claySoft: "#D9A85B",
+  rust: "#9C4324",
+  gold: "#C99A2E",
+  line: "#D3C49E",
+};
+
+const STAGES = [
+  { key: "labour", label: "Labour", icon: "sprout" },
+  { key: "pulverisation", label: "Pulvér.", icon: "droplet" },
+  { key: "semis", label: "Semis", icon: "cloud-rain" },
+  { key: "recolte", label: "Récolte", icon: "wheat" },
+];
+
+const DEFAULT_RATES = {
+  labourPulveParHa: 110000,
+  prixQuaker: 750,
+  quakersParHa: 180,
+  prixPlantationParQuaker: 500,
+};
+
+const fmtF = (n) =>
+  Math.round(n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ") + " FCFA";
+
+const fmtDate = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
+};
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+function addMonths(iso, months) {
+  const d = new Date(iso + "T00:00:00");
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetween(isoA, isoB) {
+  const a = new Date(isoA + "T00:00:00");
+  const b = new Date(isoB + "T00:00:00");
+  return Math.round((b - a) / 86400000);
+}
+
+/* ------------------------------------------------------------------ */
+/* Storage (localStorage — this now runs as a real hosted page)         */
+/* ------------------------------------------------------------------ */
+function loadData() {
+  let parcelles = [];
+  let rates = DEFAULT_RATES;
+  try {
+    const raw = localStorage.getItem("arachides_parcelles");
+    if (raw) parcelles = JSON.parse(raw);
+  } catch (e) {}
+  try {
+    const raw = localStorage.getItem("arachides_rates");
+    if (raw) rates = { ...DEFAULT_RATES, ...JSON.parse(raw) };
+  } catch (e) {}
+  return { parcelles, rates };
+}
+function saveParcelles(parcelles) {
+  try { localStorage.setItem("arachides_parcelles", JSON.stringify(parcelles)); }
+  catch (e) { console.error("Erreur de sauvegarde des parcelles", e); }
+}
+function saveRates(rates) {
+  try { localStorage.setItem("arachides_rates", JSON.stringify(rates)); }
+  catch (e) { console.error("Erreur de sauvegarde des tarifs", e); }
+}
+
+/* ------------------------------------------------------------------ */
+/* Domain helpers                                                       */
+/* ------------------------------------------------------------------ */
+function stageIndex(p) {
+  if (p.dates.recolte) return 4;
+  if (p.dates.semis) return 3;
+  if (p.dates.pulverisation) return 2;
+  if (p.dates.labour) return 1;
+  return 0;
+}
+function coutParcelle(p, rates) {
+  const coutLabourPulve = p.surface * rates.labourPulveParHa;
+  const quakersAchetes = p.quakersAchetes ?? Math.round(p.surface * rates.quakersParHa);
+  const coutAchat = quakersAchetes * rates.prixQuaker;
+  const quakersPlantes = p.quakersPlantes ?? 0;
+  const coutPlantation = quakersPlantes * rates.prixPlantationParQuaker;
+  return {
+    coutLabourPulve, coutAchat, coutPlantation,
+    total: coutLabourPulve + coutAchat + coutPlantation,
+    quakersAchetes, quakersPlantes,
+  };
+}
+function computeAlerts(parcelles) {
+  const today = todayISO();
+  const month = new Date().getMonth() + 1;
+  const alerts = [];
+  parcelles.forEach((p) => {
+    const idx = stageIndex(p);
+    if (idx === 0 && month >= 8) {
+      alerts.push({ id: p.id + "-labour", level: "urgent",
+        text: `${p.nom} : le labour n'a pas encore commencé (saison recommandée dès août).` });
+    }
+    if (idx === 1 && month >= 9) {
+      alerts.push({ id: p.id + "-pulve", level: "urgent",
+        text: `${p.nom} : labour fait, pulvérisation à prévoir (saison recommandée dès septembre).` });
+    }
+    if (idx === 2) {
+      alerts.push({ id: p.id + "-semis", level: month >= 10 ? "urgent" : "info",
+        text: `${p.nom} : en attente de pluies pour le semis (généralement octobre-novembre).` });
+    }
+    if (idx === 3) {
+      const prevue = p.dates.recolteEstimee || addMonths(p.dates.semis, 3);
+      const j = daysBetween(today, prevue);
+      if (j <= 14) {
+        alerts.push({ id: p.id + "-recolte", level: j <= 0 ? "urgent" : "info",
+          text: j <= 0
+            ? `${p.nom} : la récolte est prête (estimée le ${fmtDate(prevue)}).`
+            : `${p.nom} : récolte estimée dans ${j} jour${j > 1 ? "s" : ""} (${fmtDate(prevue)}).` });
+      }
+    }
+  });
+  return alerts;
+}
+
+/* ------------------------------------------------------------------ */
+/* Minimal icon set (hand-drawn line icons, no external dependency)     */
+/* ------------------------------------------------------------------ */
+function Icon({ name, size = 16, color = "currentColor", strokeWidth = 2 }) {
+  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+    stroke: color, strokeWidth, strokeLinecap: "round", strokeLinejoin: "round" };
+  switch (name) {
+    case "sprout":
+      return <svg {...common}><path d="M12 20V10" /><path d="M12 10C12 7 9 5 6 5c0 3 2 6 6 6" /><path d="M12 10c0-3 3-5 6-5c0 3-2 6-6 6" /></svg>;
+    case "droplet":
+      return <svg {...common}><path d="M12 3c4 5 6 8 6 11a6 6 0 0 1-12 0c0-3 2-6 6-11z" /></svg>;
+    case "cloud-rain":
+      return <svg {...common}><path d="M7 16a4 4 0 0 1 .5-8 5 5 0 0 1 9.3-1.8A4.2 4.2 0 0 1 16.5 16H7z" /><line x1="9" y1="19" x2="9" y2="21.5" /><line x1="13" y1="19" x2="13" y2="21.5" /></svg>;
+    case "wheat":
+      return <svg {...common}><path d="M12 22V4" /><path d="M12 6l-3-2M12 6l3-2M12 10.5l-3-2M12 10.5l3-2M12 15l-3-2M12 15l3-2" /></svg>;
+    case "alert-triangle":
+      return <svg {...common}><path d="M12 3 22 20H2L12 3z" /><line x1="12" y1="9.5" x2="12" y2="14" /><circle cx="12" cy="17" r=".6" fill={color} stroke="none" /></svg>;
+    case "plus":
+      return <svg {...common}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
+    case "x":
+      return <svg {...common}><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>;
+    case "pencil":
+      return <svg {...common}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></svg>;
+    case "trash":
+      return <svg {...common}><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /></svg>;
+    case "coins":
+      return <svg {...common}><ellipse cx="12" cy="6.5" rx="7" ry="3" /><path d="M5 6.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" /><path d="M5 12.5v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" /></svg>;
+    case "grid":
+      return <svg {...common}><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>;
+    case "clipboard":
+      return <svg {...common}><rect x="5" y="4" width="14" height="17" rx="2" /><rect x="9" y="2" width="6" height="4" rx="1" /><line x1="8" y1="11.5" x2="16" y2="11.5" /><line x1="8" y1="15.5" x2="16" y2="15.5" /></svg>;
+    case "bar-chart":
+      return <svg {...common}><line x1="4" y1="20" x2="4" y2="12" /><line x1="10" y1="20" x2="10" y2="6" /><line x1="16" y1="20" x2="16" y2="14" /><line x1="3" y1="20" x2="21" y2="20" /></svg>;
+    case "check-circle":
+      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M8 12.5l2.5 2.5L16 9" /></svg>;
+    case "dot":
+      return <svg width={size} height={size} viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill={color} /></svg>;
+    default:
+      return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Custom lightweight charts (no external chart library)                */
+/* ------------------------------------------------------------------ */
+function StackedCostChart({ data, keys, colors, height = 190 }) {
+  const maxTotal = Math.max(1, ...data.map((d) => keys.reduce((s, k) => s + (d[k] || 0), 0)));
+  return (
+    <div>
+      <div className="flex items-end gap-3 no-scrollbar overflow-x-auto" style={{ height }}>
+        {data.map((d, i) => {
+          const total = keys.reduce((s, k) => s + (d[k] || 0), 0);
+          return (
+            <div key={i} className="flex flex-col items-center justify-end flex-shrink-0" style={{ width: 44, height: "100%" }}>
+              <div className="flex flex-col-reverse w-7 rounded-t-md overflow-hidden" style={{ height: `${Math.max(4, (total / maxTotal) * (height - 24))}px` }}>
+                {keys.map((k) => (
+                  <div key={k} style={{
+                    height: total ? `${((d[k] || 0) / total) * 100}%` : "0%",
+                    background: colors[k],
+                  }} />
+                ))}
+              </div>
+              <span className="text-[9.5px] mt-1.5 text-center leading-tight" style={{ color: COLORS.inkSoft }}>{d.nom}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 mt-3 text-[10.5px]" style={{ color: COLORS.inkSoft }}>
+        {keys.map((k) => (
+          <span key={k} className="inline-flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full inline-block" style={{ background: colors[k] }} />{k}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SimpleBarChart({ data, valueKey, color, height = 170, unit = "" }) {
+  const max = Math.max(1, ...data.map((d) => d[valueKey] || 0));
+  return (
+    <div className="flex items-end gap-3 no-scrollbar overflow-x-auto" style={{ height }}>
+      {data.map((d, i) => (
+        <div key={i} className="flex flex-col items-center justify-end flex-shrink-0" style={{ width: 48, height: "100%" }}>
+          <span className="text-[10px] font-medium mb-1" style={{ color: COLORS.ink }}>{d[valueKey]}{unit}</span>
+          <div className="w-8 rounded-t-md" style={{ height: `${Math.max(4, (d[valueKey] / max) * (height - 40))}px`, background: color }} />
+          <span className="text-[9.5px] mt-1.5 text-center leading-tight" style={{ color: COLORS.inkSoft }}>{d.nom}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Stepper                                                              */
+/* ------------------------------------------------------------------ */
+function Stepper({ p }) {
+  const idx = stageIndex(p);
+  return (
+    <div className="flex items-center w-full">
+      {STAGES.map((s, i) => {
+        const done = i < idx;
+        const current = i === idx;
+        return (
+          <React.Fragment key={s.key}>
+            <div className="flex flex-col items-center gap-1" style={{ minWidth: 44 }}>
+              <div className="w-8 h-8 rounded-full flex items-center justify-center border-2 transition-colors flex-shrink-0"
+                style={{
+                  borderColor: done || current ? COLORS.leaf : COLORS.line,
+                  background: done ? COLORS.leaf : current ? COLORS.claySoft : "transparent",
+                  color: done ? "#F7F1DE" : current ? COLORS.ink : COLORS.inkSoft,
+                }}>
+                <Icon name={s.icon} size={14} color="currentColor" />
+              </div>
+              <span className="text-[9px] text-center leading-tight" style={{ color: done || current ? COLORS.ink : COLORS.inkSoft }}>{s.label}</span>
+            </div>
+            {i < STAGES.length - 1 && (
+              <div className="flex-1 h-[2px] mb-4 min-w-[6px]" style={{ background: i < idx ? COLORS.leaf : COLORS.line }} />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Parcelle form — mobile bottom sheet                                   */
+/* ------------------------------------------------------------------ */
+function ParcelleForm({ initial, rates, onSave, onCancel }) {
+  const [form, setForm] = useState(initial || {
+    id: uid(), nom: "", surface: 1,
+    dates: { labour: "", pulverisation: "", semis: "", recolte: "", recolteEstimee: "" },
+    quakersAchetes: null, quakersPlantes: 0, rendementKg: null, notes: "",
+  });
+  const [closing, setClosing] = useState(false);
+  const close = (fn) => { setClosing(true); setTimeout(() => fn && fn(), 180); };
+  const set = (path, value) => {
+    setForm((f) => {
+      const copy = JSON.parse(JSON.stringify(f));
+      if (path.startsWith("dates.")) copy.dates[path.split(".")[1]] = value;
+      else copy[path] = value;
+      return copy;
+    });
+  };
+  const suggestedQuakers = Math.round((form.surface || 0) * rates.quakersParHa);
+  const inputCls = "w-full mt-1.5 rounded-xl px-3.5 py-3 border outline-none text-[15px]";
+  const inputStyle = { borderColor: COLORS.line, background: "#fff", color: COLORS.ink };
+  const labelCls = "text-[11px] font-medium uppercase tracking-wide";
+
+  return (
+    <div className={`fixed inset-0 z-50 flex items-end justify-center bg-black/45 ${closing ? "" : "backdrop-in"}`} onClick={() => close(onCancel)}>
+      <div className={`w-full sm:max-w-md rounded-t-[28px] max-h-[90vh] overflow-y-auto no-scrollbar ${closing ? "" : "sheet-up"}`}
+        style={{ background: COLORS.card, transform: closing ? "translateY(100%)" : undefined, transition: closing ? "transform .18s ease" : undefined }}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-center pt-2.5 pb-1"><div className="w-10 h-1.5 rounded-full" style={{ background: COLORS.line }} /></div>
+        <div className="flex items-center justify-between px-5 pb-3 pt-1">
+          <h3 className="font-semibold text-lg fraunces" style={{ color: COLORS.ink }}>{initial ? "Modifier la parcelle" : "Nouvelle parcelle"}</h3>
+          <button onClick={() => close(onCancel)} className="p-2 -mr-2 rounded-full press" style={{ background: COLORS.cardAlt }}><Icon name="x" size={17} color={COLORS.inkSoft} /></button>
+        </div>
+        <div className="px-5 space-y-4 pb-2">
+          <div>
+            <label className={labelCls} style={{ color: COLORS.inkSoft }}>Nom de la parcelle</label>
+            <input className={inputCls} style={inputStyle} placeholder="ex. Parcelle Nord" value={form.nom} onChange={(e) => set("nom", e.target.value)} />
+          </div>
+          <div>
+            <label className={labelCls} style={{ color: COLORS.inkSoft }}>Surface (hectares)</label>
+            <input type="number" inputMode="decimal" min="0" step="0.1" className={inputCls} style={inputStyle} value={form.surface} onChange={(e) => set("surface", parseFloat(e.target.value) || 0)} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className={labelCls} style={{ color: COLORS.inkSoft }}>Labour</label>
+              <input type="date" className={inputCls + " text-sm"} style={inputStyle} value={form.dates.labour} onChange={(e) => set("dates.labour", e.target.value)} /></div>
+            <div><label className={labelCls} style={{ color: COLORS.inkSoft }}>Pulvérisation</label>
+              <input type="date" className={inputCls + " text-sm"} style={inputStyle} value={form.dates.pulverisation} onChange={(e) => set("dates.pulverisation", e.target.value)} /></div>
+            <div><label className={labelCls} style={{ color: COLORS.inkSoft }}>Semis</label>
+              <input type="date" className={inputCls + " text-sm"} style={inputStyle} value={form.dates.semis}
+                onChange={(e) => { set("dates.semis", e.target.value); if (e.target.value && !form.dates.recolteEstimee) set("dates.recolteEstimee", addMonths(e.target.value, 3)); }} /></div>
+            <div><label className={labelCls} style={{ color: COLORS.inkSoft }}>Récolte réelle</label>
+              <input type="date" className={inputCls + " text-sm"} style={inputStyle} value={form.dates.recolte} onChange={(e) => set("dates.recolte", e.target.value)} /></div>
+          </div>
+          <div className="rounded-2xl p-3.5" style={{ background: COLORS.cardAlt }}>
+            <label className={labelCls} style={{ color: COLORS.inkSoft }}>Quakers achetés <span className="opacity-70 normal-case">(suggestion : {suggestedQuakers})</span></label>
+            <input type="number" inputMode="numeric" min="0" className={inputCls} style={{ ...inputStyle, marginTop: 6 }} placeholder={String(suggestedQuakers)}
+              value={form.quakersAchetes ?? ""} onChange={(e) => set("quakersAchetes", e.target.value === "" ? null : parseInt(e.target.value))} />
+            <label className={labelCls + " block mt-3"} style={{ color: COLORS.inkSoft }}>Quakers plantés</label>
+            <input type="number" inputMode="numeric" min="0" className={inputCls} style={inputStyle} value={form.quakersPlantes} onChange={(e) => set("quakersPlantes", parseInt(e.target.value) || 0)} />
+          </div>
+          <div>
+            <label className={labelCls} style={{ color: COLORS.inkSoft }}>Rendement récolté (kg)</label>
+            <input type="number" inputMode="decimal" min="0" className={inputCls} style={inputStyle} value={form.rendementKg ?? ""} onChange={(e) => set("rendementKg", e.target.value === "" ? null : parseFloat(e.target.value))} />
+          </div>
+          <div>
+            <label className={labelCls} style={{ color: COLORS.inkSoft }}>Notes</label>
+            <textarea className={inputCls + " text-sm"} style={inputStyle} rows={2} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+          </div>
+        </div>
+        <div className="flex gap-3 px-5 pt-4" style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 20px)" }}>
+          <button onClick={() => close(onCancel)} className="flex-1 rounded-2xl py-3.5 font-medium border press" style={{ borderColor: COLORS.line, color: COLORS.inkSoft }}>Annuler</button>
+          <button onClick={() => form.nom.trim() && close(() => onSave(form))} className="flex-1 rounded-2xl py-3.5 font-medium press" style={{ background: COLORS.leaf, color: "#F7F1DE" }}>Enregistrer</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Quaker grid — signature visual                                       */
+/* ------------------------------------------------------------------ */
+function statusColor(p) {
+  const idx = stageIndex(p);
+  if (idx >= 4) return COLORS.gold;
+  if (idx === 3) return COLORS.leaf;
+  if (idx === 2) return COLORS.leafDark;
+  if (idx === 1) return COLORS.claySoft;
+  return COLORS.line;
+}
+function QuakerGrid({ p, rates }) {
+  const total = p.quakersAchetes ?? Math.round(p.surface * rates.quakersParHa);
+  const plantes = Math.min(p.quakersPlantes || 0, total);
+  const cols = Math.max(12, Math.round(Math.sqrt(total * 1.6)));
+  const dots = Array.from({ length: total });
+  const idx = stageIndex(p);
+  const baseColor = statusColor(p);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2.5">
+        <span className="text-[15px] font-medium" style={{ color: COLORS.ink }}>{p.nom}</span>
+        <span className="text-[11px]" style={{ color: COLORS.inkSoft }}>{p.surface} ha · {total} quakers</span>
+      </div>
+      <div className="grid gap-[3px] p-3 rounded-xl overflow-hidden" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, background: COLORS.cardAlt }}>
+        {dots.map((_, i) => {
+          const isPlanted = idx >= 3 && i < plantes;
+          const color = idx >= 3 ? (isPlanted ? baseColor : COLORS.line) : idx >= 1 ? baseColor : COLORS.line;
+          return <div key={i} className="rounded-full aspect-square transition-colors duration-500" style={{ background: color, minWidth: 2 }} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Screens                                                               */
+/* ------------------------------------------------------------------ */
+function StatCard({ icon, label, value, small }) {
+  return (
+    <div className="rounded-2xl p-3.5" style={{ background: COLORS.card }}>
+      <div className="w-7 h-7 rounded-lg flex items-center justify-center mb-2" style={{ background: COLORS.cardAlt }}>
+        <Icon name={icon} size={14} color={COLORS.leaf} />
+      </div>
+      <div className={small ? "text-[13px] font-semibold leading-tight" : "text-lg font-semibold leading-tight"} style={{ color: COLORS.ink, fontFamily: "Fraunces, serif" }}>{value}</div>
+      <div className="text-[10.5px] mt-1" style={{ color: COLORS.inkSoft }}>{label}</div>
+    </div>
+  );
+}
+
+function Dashboard({ parcelles, rates, alerts }) {
+  const surfaceTotale = parcelles.reduce((s, p) => s + p.surface, 0);
+  const coutTotal = parcelles.reduce((s, p) => s + coutParcelle(p, rates).total, 0);
+  const rendementTotal = parcelles.reduce((s, p) => s + (p.rendementKg || 0), 0);
+  const recoltees = parcelles.filter((p) => stageIndex(p) >= 4).length;
+  return (
+    <div className="space-y-3.5 fade-up">
+      <div className="grid grid-cols-2 gap-2.5">
+        <StatCard icon="grid" label="Surface totale" value={`${surfaceTotale} ha`} />
+        <StatCard icon="coins" label="Coût engagé" value={fmtF(coutTotal)} small />
+        <StatCard icon="wheat" label="Rendement" value={`${rendementTotal} kg`} />
+        <StatCard icon="check-circle" label="Récoltées" value={`${recoltees}/${parcelles.length}`} />
+      </div>
+      <div className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+        <div className="flex items-center gap-2 mb-3"><Icon name="alert-triangle" size={15} color={COLORS.rust} /><h3 className="font-semibold text-[15px] fraunces" style={{ color: COLORS.ink }}>Alertes</h3></div>
+        {alerts.length === 0 ? (
+          <p className="text-[13px] leading-relaxed" style={{ color: COLORS.inkSoft }}>Rien à signaler pour le moment. Ajoute une parcelle pour commencer le suivi.</p>
+        ) : (
+          <ul className="space-y-2">
+            {alerts.map((a) => (
+              <li key={a.id} className="flex items-start gap-2.5 text-[13px] leading-snug rounded-xl p-3" style={{ background: a.level === "urgent" ? "#F1DCC9" : COLORS.cardAlt }}>
+                <Icon name="dot" size={7} color={a.level === "urgent" ? COLORS.rust : COLORS.clay} />
+                <span style={{ color: COLORS.ink }}>{a.text}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ParcellesTab({ parcelles, rates, onEdit, onDelete }) {
+  const [confirmId, setConfirmId] = useState(null);
+  return (
+    <div className="space-y-3 fade-up">
+      {parcelles.length === 0 && (
+        <div className="rounded-2xl p-7 text-center" style={{ background: COLORS.card }}>
+          <div className="flex justify-center mb-2"><Icon name="sprout" size={22} color={COLORS.leaf} /></div>
+          <p className="text-[13px] leading-relaxed" style={{ color: COLORS.inkSoft }}>Aucune parcelle enregistrée.<br />Touche le bouton + pour ajouter tes hectares.</p>
+        </div>
+      )}
+      {parcelles.map((p) => {
+        const cout = coutParcelle(p, rates);
+        return (
+          <div key={p.id} className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+            <div className="flex items-start justify-between mb-3.5">
+              <div><h4 className="font-semibold text-[15px] fraunces" style={{ color: COLORS.ink }}>{p.nom}</h4><p className="text-[11.5px]" style={{ color: COLORS.inkSoft }}>{p.surface} ha</p></div>
+              <div className="flex gap-1 -mr-1.5">
+                <button onClick={() => onEdit(p)} className="p-2.5 rounded-xl press" style={{ background: COLORS.cardAlt }}><Icon name="pencil" size={14} color={COLORS.inkSoft} /></button>
+                <button onClick={() => (confirmId === p.id ? (onDelete(p.id), setConfirmId(null)) : setConfirmId(p.id))} className="p-2.5 rounded-xl press" style={{ background: confirmId === p.id ? COLORS.rust : COLORS.cardAlt }}>
+                  <Icon name="trash" size={14} color={confirmId === p.id ? "#F7F1DE" : COLORS.rust} />
+                </button>
+              </div>
+            </div>
+            <Stepper p={p} />
+            {confirmId === p.id && (
+              <div className="mt-3 text-[11.5px] text-center rounded-lg py-1.5" style={{ background: "#F1DCC9", color: COLORS.rust }}>Touche à nouveau la corbeille pour confirmer la suppression</div>
+            )}
+            <div className="flex items-center justify-between mt-3.5 pt-3.5 border-t" style={{ borderColor: COLORS.line }}>
+              <span className="text-[12px]" style={{ color: COLORS.inkSoft }}>Coût total engagé</span>
+              <span className="text-[14px] font-semibold" style={{ color: COLORS.ink }}>{fmtF(cout.total)}</span>
+            </div>
+            {p.rendementKg != null && (
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-[12px]" style={{ color: COLORS.inkSoft }}>Rendement</span>
+                <span className="text-[14px] font-semibold" style={{ color: COLORS.ink }}>{p.rendementKg} kg</span>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <div className="h-1" />
+    </div>
+  );
+}
+
+function CarteTab({ parcelles, rates }) {
+  if (parcelles.length === 0) {
+    return (
+      <div className="rounded-2xl p-7 text-center fade-up" style={{ background: COLORS.card }}>
+        <div className="flex justify-center mb-2"><Icon name="grid" size={22} color={COLORS.leaf} /></div>
+        <p className="text-[13px] leading-relaxed" style={{ color: COLORS.inkSoft }}>Ajoute des parcelles pour voir la carte des hectares.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3.5 fade-up">
+      <div className="flex flex-wrap gap-x-3 gap-y-1.5 text-[10.5px] px-1" style={{ color: COLORS.inkSoft }}>
+        <LegendDot color={COLORS.line} label="À labourer" />
+        <LegendDot color={COLORS.claySoft} label="Labouré" />
+        <LegendDot color={COLORS.leafDark} label="Pulvérisé" />
+        <LegendDot color={COLORS.leaf} label="Planté" />
+        <LegendDot color={COLORS.gold} label="Récolté" />
+      </div>
+      {parcelles.map((p) => <div key={p.id} className="rounded-2xl p-4" style={{ background: COLORS.card }}><QuakerGrid p={p} rates={rates} /></div>)}
+    </div>
+  );
+}
+function LegendDot({ color, label }) {
+  return <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rounded-full inline-block flex-shrink-0" style={{ background: color }} />{label}</span>;
+}
+
+function Row({ label, value, bold }) {
+  return <div className="flex items-center justify-between text-[12px] mt-1.5"><span style={{ color: COLORS.inkSoft }}>{label}</span><span style={{ color: COLORS.ink, fontWeight: bold ? 700 : 500 }}>{fmtF(value)}</span></div>;
+}
+function RateInput({ label, value, onChange }) {
+  return (
+    <div className="flex items-center justify-between gap-3 mb-2.5">
+      <label className="text-[12px] flex-1" style={{ color: COLORS.inkSoft }}>{label}</label>
+      <input type="number" inputMode="numeric" className="w-28 rounded-xl px-3 py-2.5 border text-sm outline-none text-right" style={{ borderColor: COLORS.line, background: "#fff", color: COLORS.ink }} value={value} onChange={(e) => onChange(parseFloat(e.target.value) || 0)} />
+    </div>
+  );
+}
+
+function FinancesTab({ parcelles, rates, onRatesChange }) {
+  const [local, setLocal] = useState(rates);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => setLocal(rates), [rates]);
+  const total = parcelles.reduce((s, p) => s + coutParcelle(p, local).total, 0);
+  return (
+    <div className="space-y-3.5 fade-up">
+      <div className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+        <h3 className="font-semibold text-[15px] mb-3 fraunces" style={{ color: COLORS.ink }}>Tarifs de référence</h3>
+        <RateInput label="Labour + pulvérisation / ha" value={local.labourPulveParHa} onChange={(v) => setLocal({ ...local, labourPulveParHa: v })} />
+        <RateInput label="Prix d'un quaker" value={local.prixQuaker} onChange={(v) => setLocal({ ...local, prixQuaker: v })} />
+        <RateInput label="Quakers par hectare" value={local.quakersParHa} onChange={(v) => setLocal({ ...local, quakersParHa: v })} />
+        <RateInput label="Prix plantation / quaker" value={local.prixPlantationParQuaker} onChange={(v) => setLocal({ ...local, prixPlantationParQuaker: v })} />
+        <button onClick={() => { onRatesChange(local); setSaved(true); setTimeout(() => setSaved(false), 1500); }} className="w-full mt-1 rounded-xl py-3 font-medium text-sm press" style={{ background: saved ? COLORS.leafDark : COLORS.leaf, color: "#F7F1DE" }}>
+          {saved ? "Tarifs mis à jour ✓" : "Mettre à jour les tarifs"}
+        </button>
+      </div>
+      <div className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+        <h3 className="font-semibold text-[15px] mb-3 fraunces" style={{ color: COLORS.ink }}>Détail par parcelle</h3>
+        {parcelles.length === 0 ? <p className="text-[13px]" style={{ color: COLORS.inkSoft }}>Aucune parcelle pour l'instant.</p> : (
+          <div className="space-y-3">
+            {parcelles.map((p) => {
+              const c = coutParcelle(p, local);
+              return (
+                <div key={p.id} className="pb-3 border-b last:border-0" style={{ borderColor: COLORS.line }}>
+                  <div className="text-[13.5px] font-medium mb-1" style={{ color: COLORS.ink }}>{p.nom}</div>
+                  <Row label="Labour + pulvérisation" value={c.coutLabourPulve} />
+                  <Row label={`Achat quakers (${c.quakersAchetes})`} value={c.coutAchat} />
+                  <Row label={`Plantation (${c.quakersPlantes})`} value={c.coutPlantation} />
+                  <Row label="Total" value={c.total} bold />
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="flex items-center justify-between mt-2.5 pt-2.5 border-t-2" style={{ borderColor: COLORS.leaf }}>
+          <span className="font-semibold text-[13.5px]" style={{ color: COLORS.ink }}>Total général</span>
+          <span className="font-semibold text-[15px]" style={{ color: COLORS.leaf }}>{fmtF(total)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatsTab({ parcelles, rates }) {
+  const costData = parcelles.map((p) => {
+    const c = coutParcelle(p, rates);
+    return { nom: p.nom.length > 8 ? p.nom.slice(0, 7) + "…" : p.nom, "Labour+Pulvé": c.coutLabourPulve, "Achat": c.coutAchat, "Plantation": c.coutPlantation };
+  });
+  const yieldData = parcelles.filter((p) => p.rendementKg != null).map((p) => ({ nom: p.nom.length > 8 ? p.nom.slice(0, 7) + "…" : p.nom, "kg/ha": p.surface ? Math.round(p.rendementKg / p.surface) : 0 }));
+  if (parcelles.length === 0) {
+    return (
+      <div className="rounded-2xl p-7 text-center fade-up" style={{ background: COLORS.card }}>
+        <div className="flex justify-center mb-2"><Icon name="bar-chart" size={22} color={COLORS.leaf} /></div>
+        <p className="text-[13px] leading-relaxed" style={{ color: COLORS.inkSoft }}>Les statistiques apparaîtront ici une fois des parcelles ajoutées.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3.5 fade-up">
+      <div className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+        <h3 className="font-semibold text-[15px] mb-3 fraunces" style={{ color: COLORS.ink }}>Répartition des coûts</h3>
+        <StackedCostChart data={costData} keys={["Labour+Pulvé", "Achat", "Plantation"]} colors={{ "Labour+Pulvé": COLORS.clay, "Achat": COLORS.claySoft, "Plantation": COLORS.leaf }} />
+      </div>
+      {yieldData.length > 0 && (
+        <div className="rounded-2xl p-4" style={{ background: COLORS.card }}>
+          <h3 className="font-semibold text-[15px] mb-3 fraunces" style={{ color: COLORS.ink }}>Rendement (kg/ha)</h3>
+          <SimpleBarChart data={yieldData} valueKey="kg/ha" color={COLORS.gold} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* iOS "add to home screen" hint                                        */
+/* ------------------------------------------------------------------ */
+function IosInstallHint() {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const isIos = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
+    const isStandalone = window.navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+    const dismissed = localStorage.getItem("arachides_ios_hint_dismissed");
+    if (isIos && !isStandalone && !dismissed) setVisible(true);
+  }, []);
+  if (!visible) return null;
+  return (
+    <div className="mx-5 mb-3 rounded-xl p-3 text-[12px] leading-snug flex items-start gap-2" style={{ background: COLORS.cardAlt, color: COLORS.ink }}>
+      <span>📲</span>
+      <span className="flex-1">Pour l'installer : appuie sur <b>Partager</b> puis <b>« Sur l'écran d'accueil »</b>.</span>
+      <button onClick={() => { setVisible(false); localStorage.setItem("arachides_ios_hint_dismissed", "1"); }} className="p-1"><Icon name="x" size={14} color={COLORS.inkSoft} /></button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Root app                                                              */
+/* ------------------------------------------------------------------ */
+function App() {
+  const [parcelles, setParcelles] = useState([]);
+  const [rates, setRates] = useState(DEFAULT_RATES);
+  const [tab, setTab] = useState("dashboard");
+  const [editing, setEditing] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    const { parcelles, rates } = loadData();
+    setParcelles(parcelles);
+    setRates(rates);
+    setLoaded(true);
+  }, []);
+
+  const persistParcelles = useCallback((next) => { setParcelles(next); saveParcelles(next); }, []);
+  const handleSaveParcelle = (p) => {
+    const exists = parcelles.some((x) => x.id === p.id);
+    const next = exists ? parcelles.map((x) => (x.id === p.id ? p : x)) : [...parcelles, p];
+    persistParcelles(next); setShowForm(false); setEditing(null);
+  };
+  const handleDelete = (id) => persistParcelles(parcelles.filter((p) => p.id !== id));
+  const handleRatesChange = (r) => { setRates(r); saveRates(r); };
+  const alerts = useMemo(() => computeAlerts(parcelles), [parcelles]);
+
+  const TABS = [
+    { key: "dashboard", label: "Tableau", icon: "clipboard" },
+    { key: "parcelles", label: "Parcelles", icon: "sprout" },
+    { key: "carte", label: "Carte", icon: "grid" },
+    { key: "finances", label: "Finances", icon: "coins" },
+    { key: "stats", label: "Stats", icon: "bar-chart" },
+  ];
+  const onScroll = (e) => setScrolled(e.target.scrollTop > 4);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center sm:py-6" style={{ background: COLORS.frame }}>
+      <div className="w-full sm:max-w-[420px] sm:rounded-[36px] sm:shadow-2xl overflow-hidden relative flex flex-col" style={{ background: COLORS.page, height: "100dvh", maxHeight: "100dvh" }}>
+        {!loaded ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-2"><Icon name="wheat" size={26} color={COLORS.clay} /><p className="text-xs" style={{ color: COLORS.inkSoft }}>Chargement…</p></div>
+          </div>
+        ) : (
+          <>
+            <header className="px-5 pt-6 pb-3.5 flex-shrink-0 relative z-10" style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 20px)", background: COLORS.page, boxShadow: scrolled ? "0 4px 10px -6px rgba(38,36,28,0.25)" : "none", transition: "box-shadow .2s ease" }}>
+              <div className="flex items-center gap-1.5 mb-1"><Icon name="wheat" size={17} color={COLORS.clay} /><span className="text-[10.5px] font-semibold tracking-wider uppercase" style={{ color: COLORS.clay }}>Registre de culture</span></div>
+              <h1 className="text-[22px] font-semibold fraunces leading-tight" style={{ color: COLORS.ink }}>Arachides — Madingou</h1>
+              <p className="text-[11.5px] mt-1" style={{ color: COLORS.inkSoft }}>{new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</p>
+            </header>
+
+            <IosInstallHint />
+
+            <main ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto no-scrollbar px-5" style={{ paddingBottom: 24 }}>
+              <div key={tab}>
+                {tab === "dashboard" && <Dashboard parcelles={parcelles} rates={rates} alerts={alerts} />}
+                {tab === "parcelles" && <ParcellesTab parcelles={parcelles} rates={rates} onEdit={(p) => { setEditing(p); setShowForm(true); }} onDelete={handleDelete} />}
+                {tab === "carte" && <CarteTab parcelles={parcelles} rates={rates} />}
+                {tab === "finances" && <FinancesTab parcelles={parcelles} rates={rates} onRatesChange={handleRatesChange} />}
+                {tab === "stats" && <StatsTab parcelles={parcelles} rates={rates} />}
+              </div>
+            </main>
+
+            {tab === "parcelles" && (
+              <button onClick={() => { setEditing(null); setShowForm(true); }} className="absolute right-5 press flex items-center justify-center rounded-full shadow-lg" style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 82px)", width: 54, height: 54, background: COLORS.leaf, boxShadow: "0 8px 20px -6px rgba(51,63,29,0.55)" }}>
+                <Icon name="plus" size={24} color="#F7F1DE" />
+              </button>
+            )}
+
+            <nav className="flex-shrink-0 flex justify-around border-t relative z-10" style={{ background: "rgba(247,241,222,0.92)", backdropFilter: "blur(8px)", borderColor: COLORS.line, paddingTop: 8, paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 8px)" }}>
+              {TABS.map((t) => {
+                const active = tab === t.key;
+                return (
+                  <button key={t.key} onClick={() => setTab(t.key)} className="flex flex-col items-center gap-1 px-2 py-1 rounded-lg press" style={{ minWidth: 48, minHeight: 44 }}>
+                    <Icon name={t.icon} size={19} color={active ? COLORS.leaf : COLORS.inkSoft} strokeWidth={active ? 2.4 : 2} />
+                    <span className="text-[9.5px]" style={{ color: active ? COLORS.leaf : COLORS.inkSoft, fontWeight: active ? 700 : 500 }}>{t.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
+
+            {showForm && <ParcelleForm initial={editing} rates={rates} onSave={handleSaveParcelle} onCancel={() => { setShowForm(false); setEditing(null); }} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
